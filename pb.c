@@ -1130,6 +1130,33 @@ LUALIB_API int lpb_newslice(lua_State *L, const char *s, size_t len) {
     return 1;
 }
 
+static int Lslice_reset_unsafe(lua_State *L) {
+    lpb_Slice *s = (lpb_Slice*)check_slice(L, 1);
+    size_t size = lua_rawlen(L, 1);
+    lpb_resetslice(L, s, size);
+    int type = lua_type(L, 2);
+    if(type != LUA_TLIGHTUSERDATA)
+    {
+        return luaL_error(L, "invalid argument type");
+    }
+
+    const char *data = (const char *)lua_touserdata(L, 2);
+    size_t len = (size_t)luaL_checkinteger(L, 3);
+    pb_Slice base = pb_lslice(data, len);
+    s->curr = base;
+
+
+    lua_Integer r[2] = {1, -1};
+    lua_Integer range = rangerelat(L, 4, r, len);
+    pb_Slice view;
+    view.p     = base.p + r[0] - 1;
+    view.end   = view.p + range;
+    view.start = base.p;
+    lpb_enterview(L, s, view);
+
+    return lua_settop(L, 1), 1;
+}
+
 LUALIB_API int luaopen_pb_slice(lua_State *L) {
     luaL_Reg libs[] = {
         { "__tostring", Lslice_tostring },
@@ -1146,6 +1173,7 @@ LUALIB_API int luaopen_pb_slice(lua_State *L) {
         ENTRY(enter),
         ENTRY(leave),
         ENTRY(unpack),
+        ENTRY(reset_unsafe),
 #undef  ENTRY
         { NULL, NULL }
     };
@@ -2066,6 +2094,40 @@ static int Lpb_option(lua_State *L) {
 #undef  OPTS
 }
 
+static int Lpb_unpack_int64(lua_State *L) {
+    const char *data = (const char *)lua_touserdata(L, 1);
+    if (data == NULL) {
+        return luaL_error(L, "invalid userdata pointer");
+    }
+    size_t offset = (size_t)luaL_optinteger(L, 2, 0);
+    size_t size = (size_t)luaL_optinteger(L, 3, 0);
+    
+    if (size > 0 && offset + 8 > size) {
+        return luaL_error(L, "buffer too small for int64");
+    }
+    
+    uint64_t val = *(const uint64_t *)(data + offset);
+    lua_pushinteger(L, (lua_Integer)val);
+    return 1;
+}
+
+static int Lpb_unpack_int(lua_State *L) {
+    const char *data = (const char *)lua_touserdata(L, 1);
+    if (data == NULL) {
+        return luaL_error(L, "invalid userdata pointer");
+    }
+    size_t offset = (size_t)luaL_optinteger(L, 2, 0);
+    size_t size = (size_t)luaL_optinteger(L, 3, 0);
+    
+    if (size > 0 && offset + 4 > size) {
+        return luaL_error(L, "buffer too small for int32");
+    }
+    
+    uint32_t val = *(const uint32_t *)(data + offset);
+    lua_pushinteger(L, (lua_Integer)val);
+    return 1;
+}
+
 LUALIB_API int luaopen_pb(lua_State *L) {
     luaL_Reg libs[] = {
 #define ENTRY(name) { #name, Lpb_##name }
@@ -2090,6 +2152,8 @@ LUALIB_API int luaopen_pb(lua_State *L) {
         ENTRY(state),
         ENTRY(pack),
         ENTRY(unpack),
+        ENTRY(unpack_int64),
+        ENTRY(unpack_int),
 #undef  ENTRY
         { NULL, NULL }
     };
@@ -2105,6 +2169,8 @@ LUALIB_API int luaopen_pb(lua_State *L) {
     }
     lua_pop(L, 1);
     return luaL_newlib(L, libs), 1;
+    // luaL_newlib(L, libs);
+    // return 1;
 }
 
 static int Lpb_decode_unsafe(lua_State *L) {
