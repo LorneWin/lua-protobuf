@@ -840,6 +840,25 @@ static int Lbuf_ptr(lua_State *L) {
     return 2;
 }
 
+#if defined(SKYNET_LUA)
+static int Lbuf_pack_msg(lua_State *L) {
+    pb_Buffer *buf = check_buffer(L, 1);
+    size_t len = buf->size + 4;
+    void *ptr = skynet_malloc(len);
+    memcpy(ptr + 4, buf->buff, buf->size);
+
+    unsigned char *p = (unsigned char *)ptr;
+    p[0] = (unsigned char)(len & 0xFF);
+    p[1] = (unsigned char)((len >> 8) & 0xFF);
+    p[2] = (unsigned char)((len >> 16) & 0xFF);
+    p[3] = (unsigned char)((len >> 24) & 0xFF);
+
+    lua_pushlightuserdata(L, ptr);
+    lua_pushinteger(L, len);
+    return 2;
+}
+#endif
+
 LUALIB_API int luaopen_pb_buffer(lua_State *L) {
     luaL_Reg libs[] = {
         { "__tostring", Lbuf_tostring },
@@ -854,6 +873,9 @@ LUALIB_API int luaopen_pb_buffer(lua_State *L) {
         ENTRY(reset),
         ENTRY(pack),
         ENTRY(ptr),
+#if defined(SKYNET_LUA)
+        ENTRY(pack_msg),
+#endif
 #undef  ENTRY
         { NULL, NULL }
     };
@@ -1146,11 +1168,14 @@ static int Lslice_reset_unsafe(lua_State *L) {
     s->curr = base;
 
 
-    lua_Integer r[2] = {1, -1};
-    lua_Integer range = rangerelat(L, 4, r, len);
+    int offset = luaL_optinteger(L, 4, 0); 
+    if (offset > (int)len || offset < 0) {
+        return luaL_error(L, "offset out of range");
+    }
+
     pb_Slice view;
-    view.p     = base.p + r[0] - 1;
-    view.end   = view.p + range;
+    view.p     = base.p + offset;
+    view.end   = base.p + len;
     view.start = base.p;
     lpb_enterview(L, s, view);
 
@@ -2106,7 +2131,18 @@ static int Lpb_unpack_int64(lua_State *L) {
         return luaL_error(L, "buffer too small for int64");
     }
     
-    uint64_t val = *(const uint64_t *)(data + offset);
+    const unsigned char *p = (const unsigned char *)data + offset;
+    
+    // 必须强制转换为 uint64_t 后再进行位移，否则会溢出
+    uint64_t val = (uint64_t)p[0] | 
+                   ((uint64_t)p[1] << 8) | 
+                   ((uint64_t)p[2] << 16) | 
+                   ((uint64_t)p[3] << 24) |
+                   ((uint64_t)p[4] << 32) | 
+                   ((uint64_t)p[5] << 40) |
+                   ((uint64_t)p[6] << 48) | 
+                   ((uint64_t)p[7] << 56);
+                   
     lua_pushinteger(L, (lua_Integer)val);
     return 1;
 }
@@ -2123,9 +2159,81 @@ static int Lpb_unpack_int(lua_State *L) {
         return luaL_error(L, "buffer too small for int32");
     }
     
-    uint32_t val = *(const uint32_t *)(data + offset);
+    const unsigned char *p = (const unsigned char *)data + offset;
+    uint32_t val = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | 
+                   ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    
     lua_pushinteger(L, (lua_Integer)val);
     return 1;
+}
+
+//编码结果到buff的指定位置
+static int Lpb_encode_at(lua_State *L) {
+    lpb_State *LS = lpb_lstate(L);
+    const pb_Type *t = lpb_type(L, LS, lpb_checkslice(L, 1));
+    lpb_Env e;
+    argcheck(L, t!=NULL, 1, "type '%s' does not exists", lua_tostring(L, 1));
+    luaL_checktype(L, 2, LUA_TTABLE);
+    e.L = L, e.LS = LS, e.b = test_buffer(L, 3);
+    //必须要求提供buffer
+    if (e.b == NULL) {
+        return luaL_error(L, "buffer is null");
+    }
+    int offset = (int)luaL_optinteger(L, 4, 0);
+    if (offset < 0) {
+        return luaL_error(L, "offset is negative");
+    }
+    pb_bufflen(e.b) = 0;
+    //长度不够先扩容
+    pb_prepbuffsize(e.b, offset);
+    pb_bufflen(e.b) = offset;
+    if (e.LS->use_enc_hooks) lpb_useenchooks(&e, 2, t);
+    lpbE_encode(&e, 2, t);
+    return lua_settop(L, 3), 1;
+}
+
+static int Lpb_pack_int32_at(lua_State *L) {
+    pb_Buffer *b = test_buffer(L, 1);
+    if (!b) return luaL_error(L, "arg 1 must be buffer");
+    
+    size_t offset = (size_t)luaL_checkinteger(L, 2);
+    uint32_t val = (uint32_t)luaL_checkinteger(L, 3);
+    
+    if (offset + 4 > b->size) {
+        return luaL_error(L, "buffer out of range");
+    }
+    
+    // 写入小端整数
+    unsigned char *p = (unsigned char *)b->buff + offset;
+    p[0] = (unsigned char)(val & 0xFF);
+    p[1] = (unsigned char)((val >> 8) & 0xFF);
+    p[2] = (unsigned char)((val >> 16) & 0xFF);
+    p[3] = (unsigned char)((val >> 24) & 0xFF);
+    return 0;
+}
+
+static int Lpb_pack_int64_at(lua_State *L) {
+    pb_Buffer *b = test_buffer(L, 1);
+    if (!b) return luaL_error(L, "arg 1 must be buffer");
+    
+    size_t offset = (size_t)luaL_checkinteger(L, 2);
+    uint64_t val = (uint64_t)luaL_checkinteger(L, 3);
+    
+    if (offset + 8 > b->size) {
+        return luaL_error(L, "buffer out of range");
+    }
+    
+    // 写入小端整数
+    unsigned char *p = (unsigned char *)b->buff + offset;
+    p[0] = (unsigned char)(val & 0xFF);
+    p[1] = (unsigned char)((val >> 8) & 0xFF);
+    p[2] = (unsigned char)((val >> 16) & 0xFF);
+    p[3] = (unsigned char)((val >> 24) & 0xFF);
+    p[4] = (unsigned char)((val >> 32) & 0xFF);
+    p[5] = (unsigned char)((val >> 40) & 0xFF);
+    p[6] = (unsigned char)((val >> 48) & 0xFF);
+    p[7] = (unsigned char)((val >> 56) & 0xFF);
+    return 0;
 }
 
 LUALIB_API int luaopen_pb(lua_State *L) {
@@ -2154,6 +2262,9 @@ LUALIB_API int luaopen_pb(lua_State *L) {
         ENTRY(unpack),
         ENTRY(unpack_int64),
         ENTRY(unpack_int),
+        ENTRY(encode_at),
+        ENTRY(pack_int32_at),
+        ENTRY(pack_int64_at),
 #undef  ENTRY
         { NULL, NULL }
     };

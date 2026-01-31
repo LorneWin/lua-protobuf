@@ -74,6 +74,19 @@ typedef signed   long long  int64_t;
 #include <stddef.h>
 #include <limits.h>
 
+#include <lua.h>
+#if defined(LUAJIT_VERSION) || LUA_VERSION_NUM == 501
+#define OPENRESY_LUA
+#pragma message "OPENRESY_LUA"
+#else
+#define SKYNET_LUA
+#pragma message "SKYNET_LUA"
+#endif /*LUAJIT_VERSION || LUA_VERSION_NUM == 501*/
+
+#if defined(SKYNET_LUA)
+#include "skynet_malloc.h"
+#endif
+
 PB_NS_BEGIN
 
 
